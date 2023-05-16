@@ -26,6 +26,7 @@ prop_data <- data %>% select(c(1,2,18, 23:36), ends_with("diff")) %>%
                values_to = "productivity", values_drop_na = T) %>%
   group_by(provincename, industry) %>% nest() %>% ungroup()
 
+# Run Independent Models in Parallel and Store Their Results
 plan(multisession, workers = as.integer(availableCores()))
 
 prop_results_tidy <- prop_data %>% 
