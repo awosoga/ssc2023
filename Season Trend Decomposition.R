@@ -35,7 +35,7 @@ get_components <- function(i, j) {
     GeoUID = unique(weather_portion$GeoUID)[i], 
     variable = unique(weather_portion$variable)[j], 
     seasonal = (time_series[[i*j]][2] %>% bind_rows() %>% pull() %>% as.numeric()),
-    trend = (time_series[[i*j]][3] %>% bind_rows()) %>% pull() %>% as.numeric(),
+    trend = (time_series[[i*j]][3] %>% bind_rows()) %>% pull() %>% as.numeric()),
     random = (time_series[[i*j]][4] %>% bind_rows() %>% pull() %>% as.numeric())
   )
 }
