@@ -1,0 +1,1 @@
+This is a folder of ideas that we did not have the time or expertise to fully implement before the case study submission. Anyone interested in extending this project can use these files as a headstart
