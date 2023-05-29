@@ -1,0 +1,12 @@
+__loadDisplayList__40bc30a4([
+  {
+    "group": "common",
+    "name": "Productivity_Proportion",
+    "desc": "Economic Composition of Each Province",
+    "n": 10,
+    "height": 500,
+    "width": 1000,
+    "updated": "2023-05-28 23:58:58",
+    "keySig": "462d9a8c98f306e5de070881861c8c9a"
+  }
+])
