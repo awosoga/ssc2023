@@ -6,7 +6,7 @@
 
 **[Alireza Ghaffartehrani](mailto:aghaffartehrani@uwaterloo.ca)**, MMath Data Science Student
 
-Repository for Statistical Society of Canada [2023 Case Studies in Data Analysis Competition](https://ssc.ca/en/case-study/understanding-how-canadas-economy-might-be-impacted-climate-change) Submission
+Repository for Statistical Society of Canada (SSC) [2023 Case Studies in Data Analysis Competition](https://ssc.ca/en/case-study/understanding-how-canadas-economy-might-be-impacted-climate-change) Submission
 
 # Instructions
 
