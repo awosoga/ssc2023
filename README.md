@@ -10,6 +10,4 @@ Repository for Statistical Society of Canada [2023 Case Studies in Data Analysis
 
 # Instructions
 
-To view the interactive analysis, download `Analysis.html` and the `province_data` folder to the same directory, and open `Analysis.html`.
-
-The complete source code is housed in the `Code` folder for reproducibility.
+To view the interactive analysis, download `Analysis.html` **AND** the `province_data` folder to the same directory, and open `Analysis.html`. The complete source code is housed in the `Code` folder for reproducibility.
