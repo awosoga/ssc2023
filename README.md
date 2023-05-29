@@ -11,3 +11,5 @@ Repository for Statistical Society of Canada [2023 Case Studies in Data Analysis
 # Instructions
 
 To view the interactive analysis, download `Analysis.html` **AND** the `province_data` folder to the same directory, and open `Analysis.html`. The complete source code is housed in the `Code` folder for reproducibility.
+
+![alt text](https://github.com/awosoga/ssc2023/blob/27e147655f6e386f03d4a6ae0f2c6e7ea7f71c66/SSC%20Case%20Study%20Poster.png)
