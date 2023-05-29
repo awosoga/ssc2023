@@ -1,0 +1,589 @@
+---
+title: "Case Study Analysis"
+output:
+  html_document:
+    df_print: paged
+  html_notebook:
+    df_print: paged
+---
+
+This document covers the exploratory data analysis and research goals
+commentary for the 
+[2023 Statistical Society of Canada Case Study](https://ssc.ca/en/case-study/understanding-how-canadas-economy-might-be-impacted-climate-change/) to understand how Canada's economy might be impacted by climate change. 
+The zip files for the 3 provided data sets ([Productivity](https://people.math.carleton.ca/~davecampbell/Case_Study_2023/geojson_files.zip), [Geographies](https://people.math.carleton.ca/~davecampbell/Case_Study_2023/geojson_files.zip),
+[Weather Data](https://people.math.carleton.ca/~davecampbell/Case_Study_2023/climate_data.zip))
+are given on the website, along with background information on the case study.
+
+First, load some relevant libraries. Manual package installation may be required
+for some of the external scripts, particularly for an updated version of **`dplyr`** (1.1.0) to use the `pick()` function.
+```{r, message=FALSE, warning=FALSE}
+# Load Relevant Libraries
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(tidyverse,lubridate, sf, geojsonsf, terra, trelliscopejs, 
+               plotly, autocogs, canadianmaps, gifski, devtools, furrr)
+if (!require("STRbook")) suppressWarnings(install_github("andrewzm/STRbook"))
+```
+
+Before running this notebook, please ensure that you have run
+the following chunk separately to acquire, curate, and clean the auxiliary data.
+The scripts are highly parallelized and intended for systems with multiple cores/threads. They
+are pre-set to use the maximum number of available cores, which can be adjusted
+before running the chunk. 
+For reference, on a Dell XPS 17 9720 laptop with an 
+Intel i7-12700H (14 cores, 4.7GHz, and 16GB RAM), 
+running the chunk on 6 cores took ~3 hours.
+```{r, eval=FALSE, warning=FALSE, message=FALSE}
+# After Downloading the Productivity, Geographies, and Weather Data from the SSC Website...
+
+cores <- as.integer(availableCores())
+
+# Acquire Climate Anomaly Data from ECCC
+suppressWarnings(source("Climate Anomalies.R"))
+
+# Perform Spatial Interpolation of Climate Anomalies over Census GeoUID's 
+# Takes 80% of the time, and contains a print statement to track progress
+source("Climate Anomaly Interpolation.R")
+interpolate_anomalies(cores)
+# Combine Various Data Sources into One File
+source("Data Curation.R")
+
+# Run Model
+source("Fixed Effects Model.R")
+run_model(cores)
+
+```
+
+
+### Productivity Data Overview
+
+```{r, warning=F}
+productivity_data_full <- list.files('Productivity per NAICS within region/', 
+                                     full.names = T) %>% 
+  lapply(read_csv, show_col_types = FALSE) %>% bind_rows() %>%
+  mutate(GeoUID = as.character(GeoUID)) %>% 
+  rename_with(~gsub("production_in_division_","", .x))
+
+```
+Productivity information is provided by [Dr. Dave Campbell](https://people.math.carleton.ca/~davecampbell/Case_Study_2023/Dataset-details.html):
+
+>
+This (productivity data) comes from combining National Monthly GDP data with Provincial Annual GDP, measures of effort (provincial monthly total hours worked), 
+and the census counts of people working in different industries in different geographic locations. All geographies are defined as Census Subdivisions with respect to the 2016 census GeoUIDs. Industries are classified according to the North American Industrial Classification System (NAICS). The dominant industry for the geography is defined in `Dominant_NAICS`. There is a single value per GeoUID. There is a hex colour code associated with industries and held in the column `colourval`.The variables relating to industry all contain 2 digit numbers. Those are the NAICS values that are encompassed. In many cases categories were combined, so multiple numbers are in one variable name.
+Despite the **production** variable name, they actually approximate the **productivity = output / effort** for a month within a census subdivision.
+
+Please refer to this [GUIDE](https://www23.statcan.gc.ca/imdb/p3VD.pl?Function=getVD&TVD=1369825&CVD=1369826&CLV=0&MLV=5&D=1/) for a detailed description of each industry.
+
+```{r}
+skimr::skim(productivity_data_full)
+```
+
+The data ranges the 25 year span from January 1997 to December 2021 for the 10 
+Canadian provinces
+(territory data was unavailable). Each census subdivision has a unique `GeoUID`,
+with CSD types and their abbreviated forms found [HERE](https://www12.statcan.gc.ca/census-recensement/2021/ref/dict/tab/index-eng.cfm?ID=t1_5/).
+
+To re-frame the per-industry productivity in terms of their proportion of a province's economic composition, the raw values from each census subdivision were aggregated by province and then
+converted to proportions of the total productivity at each date. This allows for consistent comparisons to be made across time periods and provides insight into Canada's changing economic landscape. The interactive [Trelliscope](https://hafen.github.io/trelliscopejs/) visualization allows users
+to view each province and its changing productivity proportions over time.
+
+```{r, message=FALSE}
+proportion_plot <- function(data) {
+  (data %>% ggplot(aes( x = Date, 
+              y = productivity_proportion, 
+              color = industry,
+              group = industry,
+              text = sprintf(
+                "Industry: %s<br>Date: %s<br>Productivity Proportion: %s",
+                industry, format(Date,"%B %Y"),
+                scales::percent(100*productivity_proportion, scale = 1, accuracy = .01))
+              
+  )) +
+    geom_line(show.legend = F) + 
+    theme_classic() + ylab("Proportion of Productivity") + 
+    theme(legend.position = "none") + 
+    theme(panel.grid.major = element_line(linetype = "dotted", colour = "black"))
+  ) %>% 
+  ggplotly(tooltip = "text")
+}
+
+productivity_data_full %>% filter(
+  !if_any(everything(), is.na), !rowSums(.[3:16]) == 0) %>%
+  mutate(
+  across(starts_with("X"), ~.x*Population)
+) %>% group_by(provincename, Date) %>%
+  summarise(
+    across(c(starts_with("X"), Population), sum)
+  ) %>% ungroup() %>%
+  mutate(
+    across(starts_with("X"), ~.x/Population),
+    total = rowSums(pick(c(3:16))), #make sure that dplyr 1.1.0 is installed
+    across(starts_with("X"), ~.x/total)
+  ) %>% pivot_longer(cols = starts_with("X"), names_to = "industry", 
+               values_to = "productivity_proportion") %>% 
+  select(provincename, industry, productivity_proportion, Date) %>%
+  rename(Province = provincename) %>%
+  group_by(Province) %>%
+  nest(data = c(industry, productivity_proportion, Date)) %>%
+  mutate(data_plot = map_plot(data, proportion_plot)) %>% 
+  ungroup %>% trelliscope(
+    name = "Productivity_Proportion",
+    desc = "Economic Composition of Each Province",
+    path = "./province_data",
+    nrow = 2, ncol = 2, width = 1000)
+```
+
+### Geography Data Overview
+
+The geography files are multipolygons that share `GeoUID`'s with the productivity data for plotting.
+
+```{r, warning=FALSE}
+
+geography_data_full <- list.files('geojson_files', full.names = T) %>% 
+  lapply(geojson_sf) %>% 
+  bind_rows() %>% mutate(GeoUID = as.numeric(GeoUID))
+
+geography_data_full %>% filter(provincename == "Ontario") %>% 
+  ggplot() + 
+  ggtitle("Ontario, by Census Subdivisions") + 
+  geom_sf() +
+  theme_bw()
+
+```
+
+### Weather Data Overview
+
+From Dr. Campbell:
+
+>
+The weather data is directly taken from [Environment and Climate Change Canada](https://climate.weather.gc.ca/historical_data/search_historic_data_e.html/) (ECCC). The climate variables are compiled monthly at weather stations. The variables include the geographic location, time variables, and a wide range of climate variables. Not all variables are measured at each weather station. The units are included in the weather variable names. Mean values (such as `Mean Max Temp (°C)`) are taken across all calendar dates. Extreme temperature values are taken across all the whole month (such as `Extr Min Temp (°C)` = the coldest minimum temperature recorded for the month). The full set of variable definitions are [also available](https://climate.weather.gc.ca/glossary_e.html/)
+
+```{r, warning=FALSE}
+weather_data_full <- read_csv(
+  "climate_data/weather_Station_data.csv",show_col_types = FALSE) %>%
+  mutate(
+    across(ends_with("Flag"), 
+           ~replace_na(.,"VALID") %>% str_replace("TRUE", "T") %>% as.factor),
+    date_ym = make_date(year = as.numeric(Year), month = as.numeric(Month))
+  ) %>% janitor::clean_names() 
+
+skimr::skim(weather_data_full)
+```
+
+The flag definitions are given below.
+```{r}
+weathercan::flags
+```
+
+### Data Preparation
+
+While going through the productivity data, we noticed that some regions
+had unreported values. Before deciding to remove them, we wanted to see if
+there was any relationship between *the missing productivity data*, 
+*the province where the region was located*, and 
+*the population of that region*. The following visualization 
+contains boxplots of the populations, with the quartiles, minimum, and maximum 
+values labelled. There is a noticeable relationship between the selected values, 
+as every region in this figure had a population of less than 500,
+with the majority under 100. This lead us to 
+suspect that these productivity values were intentionally omitted to protect against
+[residual disclosure](https://www150.statcan.gc.ca/n1/pub/12-539-x/2009001/control-controle-eng.htm/). 
+
+```{r, warning=FALSE}
+province_codings <- matrix(c(
+"Newfoundland and Labrador", "NL",
+"Prince Edward Island", "PE",
+"Nova Scotia", "NS",
+"New Brunswick", "NB",
+"Quebec", "QC",
+"Ontario", "ON",
+"Manitoba", "MB",
+"Saskatchewan", "SK",
+"British Columbia", "BC",
+"Alberta", "AB",
+"Yukon", "YT",
+"Northwest Territories", "NT",
+"Nunavut", "NU"
+),
+ncol=2,byrow=TRUE,
+dimnames = list(NULL, c("province", "abv"))) %>% as_tibble()
+
+productivity_data_full %>% 
+filter(if_any(everything(), is.na), Population < 100) %>%
+    left_join(province_codings, by = c("provincename" = "province")) %>%
+  distinct(GeoUID, .keep_all = T) %>%
+ggplot(aes(x = abv, y = Population)) + geom_boxplot() +
+stat_summary(geom = "text", fun = quantile,
+aes(label = sprintf("%1.0f", after_stat(y)),
+color = abv), show.legend = F,
+position = position_nudge(x = 0.5), size = 3) +
+xlab("Province") + 
+ggtitle("Population Distribution of Most Regions with Unreported Productivity Values")+
+theme_classic()
+
+```
+
+Therefore, we filtered out all datapoints with missing values or zeroes across
+the row, and were left with 4468 out of the 5054 original GeoUIDs. Due to 
+how the data was prepared, the productivity values for these 4468 remaining
+census subdivisions were perfectly balanced panel data.
+
+The weather data was not so friendly, with a plethora of missing values 
+and inconsistent readings across stations. For example, not all 
+stations tracked the same measurements, and others
+were only in operation for a subset of total time range. This is partially due to the
+uneven dispersion of weather stations across the country,
+with several stations location within a small geographical area like the GTA, 
+and only **four** in the entire province of Prince Edward Island, shown below.
+
+```{r}
+
+PROV %>% filter(PT == "PE") %>% ggplot() + 
+  geom_sf() + 
+  geom_point(aes(x = longitude_x, y = latitude_y, color = "Weather Station"),
+             data = weather_data_full %>%
+            filter(date_time == "2005-01",
+                   dplyr::between(longitude_x, -64, -61),
+                   dplyr::between(latitude_y, 46, 47))
+  ) + 
+  ggtitle("Weather Station Locations in Prince Edward Island") + 
+  labs(color = NULL) + 
+  theme_void()
+
+```
+
+To combat this problem, we augmented the existing data with measurements
+from [more stations](https://docs.ropensci.org/weathercan/index.html/).
+We also added [carbon dioxide concentrations](https://www.canada.ca/en/environment-climate-change/services/environmental-indicators/greenhouse-gas-concentrations.html/) in reference to the DICE/RICE models 
+proposed by [Nordhaus](https://williamnordhaus.com/dicerice-models/).
+We also decided
+to work with **climate anomalies** instead of absolute climate measurements 
+since they are [significantly easier to accurately estimate](https://data.giss.nasa.gov/gistemp/faq/abs_temp.html/) in data sparse areas, and are more commonly used in [similar studies](https://www.ncei.noaa.gov/access/monitoring/dyk/anomalies-vs-temperature/). The reference (normals) year for the anomaly calculation was 1971-2000.
+Finally, we used the Inverse Distance Weighted (IDW) spatial 
+interpolation method to estimate climate anomalies across the country
+and aggregated them over the geographic multi-polygons that comprised each census subdivision.
+IDW satisfies [Tobler's first law of geography](https://www.geographyrealm.com/toblers-first-law-geography/#:~:text=The%20first%20law%20of%20geography,those%20that%20are%20further%20away%27.) and estimates the value of a location in space as an inversely weighted average of its neighboring points. 
+
+### Climate Anomaly Data Overview
+
+The following table gives an overview of the climate anomaly data after the spatial
+interpolation. 
+```{r}
+full_data <- read_csv("full_data.csv", show_col_types = F)
+anomaly_data_long <- full_data %>% 
+  left_join(
+    geography_data_full %>% 
+      st_drop_geometry() %>% 
+      select(GeoUID, Region.Name) %>%
+      rename(Region = Region.Name),
+    by = "GeoUID"
+  ) %>% 
+  select(Date, provincename, GeoUID, Region, ends_with("anomaly")) %>% 
+  mutate(year = year(Date)) %>% 
+  pivot_longer(cols = ends_with("anomaly"), 
+               names_to = "variable", 
+               values_to = "measurement")
+skimr::skim(full_data %>% select(ends_with("anomaly")))
+```
+
+The **positive** mean values for the minimum, maximum, and average temperature 
+show that average temperature is on the rise in Canada,
+and the **wide range** of the extreme anomalies echo
+concerns about increasing volatility in weather.
+
+```{r, animation.hook='gifski'}
+
+# Climate Anomaly Animation
+anomaly_plot <- function(date){
+  subset <- anomaly_data_long %>%
+    filter( variable %in% 
+              c("mean_max_temp_anomaly", 
+                "mean_temp_anomaly", 
+                "mean_min_temp_anomaly"), 
+            Date == date,
+            provincename == "Nova Scotia") %>% 
+    select(-provincename) %>%
+    inner_join(x = geography_data_full, by = "GeoUID")
+  
+  lim <- max(
+    abs(max(subset$measurement)),
+    abs(min(subset$measurement))
+  ) %>% ceiling()
+  
+  subset %>% ggplot() + 
+    geom_sf(aes(fill = measurement)) + 
+    ggtitle(paste0("Temperature Anomalies in Nova Scotia in ",
+                   format(as.Date(date,origin="1970-01-01"),"%B %Y"),
+                   "\n") )+
+    scale_fill_gradientn(colours = colorRamps::blue2red(10), 
+                         name = "Anomaly\nValue (˚C)",
+                         limits = c(-lim, lim)) +
+    facet_wrap(~variable, nrow = 2) +
+    theme_void() 
+}
+
+  for(t in ymd(seq(ymd("2010-01-01"), ymd("2010-12-01"), by = "months"))){
+    plot(anomaly_plot(t))
+  }
+
+```
+
+
+# Research Goals
+
+### Research Goal Analysis Part 1. Which regions are experiencing the fastest changing climate?
+
+To determine
+**which regions are experiencing the fastest changing climate**, we performed a 
+seasonal trend decomposition of each climate anomaly in a province and analyzed the 
+smoothed loess curves of the **trend** component of each climate anomaly. 
+We made visual comparisons of the correlations in the trend component as time progresses.
+
+Summary statistics are provided from the "filter" column
+of the interactive plot:
+
+```{r, warning=FALSE, message=FALSE}
+climate_time_series <- function(data) {
+  ts1 <- ts(data$measurement, frequency = 12, 
+            start = c(year(min(data$Date)),month(min(data$Date)))) %>% 
+    decompose("additive")
+}
+
+climate_trend_plot <- function(data) (
+  data$trend %>% forecast::autoplot() + 
+    stat_smooth(method = "loess", formula = y~x, show.legend = F) + 
+    xlab("Year") +
+    theme_bw() )
+
+anomaly_data_long %>%
+  filter(variable != "co2_anomaly") %>%
+  select(provincename, Region, variable, Date, measurement) %>%
+  rename(Province = provincename) %>%
+group_by(Province, variable, Date) %>%
+summarise(measurement = mean(measurement)) %>%
+  nest() %>%
+  mutate(model = map(data, climate_time_series),
+         panel = map_plot(model, climate_trend_plot)) %>% 
+  autocogs::add_panel_cogs() %>%
+  select(-c(data, model, `_x`)) %>% 
+  ungroup() %>% trelliscope(name = "Anomaly_Trends", nrow = 2, ncol = 2,
+                  width = 1200, 
+              panel_col = "panel", 
+              state = list(
+                sort = list(sort_spec("correlation")),
+                labels = c("Province", "variable", "correlation", "var")
+              ),
+              desc = "Climate Anomaly Trends For Every Canadian Province",
+              self_contained = T, 
+              path = "./anomalies")
+
+```
+
+One way to evaluate the rate of climate change in a region 
+is to compare the **magnitude**
+of correlation for climate anomalies between regions as time progresses. We defined the 
+regions of Canada with productivity data in the following way:
+
+-  *Atlantic*: Newfoundland and Labrador, Prince Edward Island, Nova Scotia, and New Brunswick
+-  *Central*: Quebec, Ontario
+-  *Prairies*: Alberta, Saskatchewan, Manitoba
+-  *West Coast*: British Columbia
+
+The *mean minimum* and *mean maximum* temperatures above the climate normal follow similar patterns to that of the shown *mean temperature* anomaly. We can see that in recent years, the positive climate anomalies are **trending upwards** across Canada, with increasing magnitudes from East to West.
+
+Atlantic Canada experiences **high variance** in the trend of *total precipitation anomalies*, but this volatility smoothens out further inland, with Alberta remaining relatively stable. The correlation experiences a similar longitudinal effect, where *precipitation anomalies* display decreasing trends in the Maritime provinces and gradually increase, eventually becoming slightly positive on the West Coast.
+
+### Research Goal Analysis Part 2. Are there economic industries that may have already experienced observable impacts from changing climate?
+
+The investigate **whether there were economic industries that have already experienced observable impacts from changing climate**,
+we performed a multivariate fixed-effects entity-demeaned OLS regression on
+each industry, with the scaled 10 climate anomalies
+as exogenous variables. We made separate models for each industry and set the proportion that the selected
+industry comprised of the entire region's economic productivity portfolio as the response variable. This allowed us to perform parameter inference independently and make within-province comparisons, using robust standard errors to determine a covariate's statistical significance. Estimated coefficients can be interpreted as the impact of the changing the climate anomaly in shifting a region towards or away from an industry, 
+and this inference factors in the observed climate anomaly trends discussed in the previous research question.
+
+```{r, message=FALSE}
+
+productivity_proportions_results <- 
+  read_csv("productivity_proportion_results_province_scaled.csv", 
+           show_col_types = F) %>%
+  mutate(term = str_remove(term, "_anomaly"),
+         industry = str_remove(industry, "_proportion")) %>%
+  group_by(provincename, industry) %>% 
+  ungroup()
+
+productivity_proportions_results %>% 
+    filter(p.value < 0.05) %>% 
+  rename(Province = provincename, Industry = industry) %>%
+  ggplot(aes(x = reorder(term, +abs(estimate)), y = estimate)) + 
+  geom_bar(stat = "identity") + 
+  theme_bw()  +
+  xlab("Anomaly") + 
+  ylab("Parameter Estimate") +
+  coord_flip() +
+  facet_trelliscope(
+    ~Province + Industry,
+    name = "Industry_Proportions",
+    desc = "Parameter estimates of statistically significant variables",
+    nrow = 1, ncol = 2, width = 500,
+    scales = "free",
+    self_contained = T,
+    path = "./proportions")
+```
+
+We focused on industries where the adjusted R^2^ of the model was above 0.2, 
+meaning that provinces with many confounding omitted variables such as Prince 
+Edward Island were excluded from some analysis. Below is a table of the top five
+R^2^ values for each province, denoting the industries that have their changes
+in proportions explained the most by the scaled climate anomalies.
+
+```{r}
+ productivity_proportions_results %>% 
+   select(provincename, industry, r_squared ) %>% 
+   group_by(provincename) %>%
+   distinct(industry, .keep_all = T) %>%
+   arrange(-r_squared) %>% slice_head(n = 5) 
+```
+
+Industries impacted by climate anomalies varied across regions but were similar within them.
+The *construction* industry in Ontario was negatively impacted by climate anomalies, as was the *financial* sector on both coasts. These can potentially be attributed to [physical risk](https://www.publicsafety.gc.ca/cnt/rsrcs/cndn-dsstr-dtbs/index-en.aspx), which manifests itself in stranded financial assets, larger insurance claims, and worse housing conditions.
+The impacts on the *natural resource* industries were mixed. In Alberta, these anomalies **increased** the productivity proportion of the natural resource industry, potentially due to a related increase in growing degree days.
+Conversely, in Atlantic Canada, these anomalies had a **negative** impact on natural resource productivity proportion, reflecting negative repercussions on the climate-vulnerable fishery and aquaculture industry.
+Increasing temperature anomalies benefited New Brunswick’s *wholesale and retail trade* industries, as well as Ontario’s and Nova Scotia’s *manufacturing* industries.
+Surprisingly, *health care and social assistance* demonstrated a mixed response to the climate anomalies requiring further analysis.
+
+```{r, fig.show='hold', out.width="33%"}
+
+#construction
+PROV %>% 
+  filter(!PRENAME %in% c("Yukon", "Northwest Territories", "Nunavut")) %>%
+  mutate(to_color = as.factor(ifelse(
+    PRENAME %in% c("Quebec", "Saskatchewan", "British Columbia", "Ontario"), 1,0))) %>%
+  ggplot() +
+  geom_sf(aes(fill = to_color), show.legend = F) +
+  scale_discrete_manual(values = c("grey90", "blue"), aesthetics = "fill") +
+  theme_void() + 
+  labs(title = "Construction")
+
+#wholesale and retail trade
+PROV %>% 
+  filter(!PRENAME %in% c("Yukon", "Northwest Territories", "Nunavut")) %>%
+  mutate(to_color = as.factor(ifelse(
+    PRENAME %in% c("Quebec", "Saskatchewan", "British Columbia", "New Brunswick"), 1,0))) %>%
+  ggplot() +
+  geom_sf(aes(fill = to_color), show.legend = F) +
+  scale_discrete_manual(values = c("grey90", "orange"), aesthetics = "fill") +
+  theme_void() +
+  labs(title = "Wholesale & Retail Trade")
+
+#health
+PROV %>% 
+  filter(!PRENAME %in% c("Yukon", "Northwest Territories", "Nunavut")) %>%
+  mutate(to_color = as.factor(ifelse(
+    PRENAME %in% c("Newfoundland and Labrador", "British Columbia"), 1,0))) %>%
+  ggplot() +
+  geom_sf(aes(fill = to_color), show.legend = F) +
+  scale_discrete_manual(values = c("grey90", "pink"), aesthetics = "fill") +
+  theme_void() +
+  labs(title = "Health Care & Social Assistance")
+
+#natural resources
+PROV %>% 
+  filter(!PRENAME %in% c("Yukon", "Northwest Territories", "Nunavut")) %>%
+  mutate(to_color = as.factor(ifelse(
+    PRENAME %in% c("Alberta", "Saskatchewan", "Manitoba", "New Brunswick"), 1,0))) %>%
+ggplot() +
+  geom_sf(aes(fill = to_color), show.legend = F) +
+  scale_discrete_manual(values = c("grey90", "red"), aesthetics = "fill") +
+  theme_void() +
+  labs(title = "Natural Resources")
+
+#manufacturing
+PROV %>% 
+  filter(!PRENAME %in% c("Yukon", "Northwest Territories", "Nunavut")) %>%
+  mutate(to_color = as.factor(ifelse(
+    PRENAME %in% c("Quebec", "Nova Scotia", "Ontario"), 1,0))) %>%
+  ggplot() +
+  geom_sf(aes(fill = to_color), show.legend = F) +
+  scale_discrete_manual(values = c("grey90", "yellow"), aesthetics = "fill") +
+  theme_void() +
+  labs(title = "Manufacturing")
+
+#finance
+PROV %>% 
+  filter(!PRENAME %in% c("Yukon", "Northwest Territories", "Nunavut")) %>%
+  mutate(to_color = as.factor(ifelse(
+    PRENAME %in% c("British Columbia", "New Brunswick", "Nova Scotia"), 1,0))) %>%
+  ggplot() +
+  geom_sf(aes(fill = to_color), show.legend = F) +
+  scale_discrete_manual(values = c("grey90", "Purple"), aesthetics = "fill") +
+  theme_void() + 
+  labs(title = "Finance, Insurance, Real Estate, Rental, & Leasing")
+
+```
+
+### Conclusions
+
+-  The West Coast and Atlantic Canada experienced the greatest volatility and trends in average temperature and total precipitation anomalies, while the Prairies and Central Canada were more resilient to them.
+-  Construction, natural resources, wholesale and retail trade, manufacturing, health care and social assistance, and the financial sector experience noticeable but distinct impacts explained by climate anomalies.
+-  Economic shocks were not accounted for and could constitute some omitted variable bias in analysis.
+
+
+### Assumptions, Limitations, and Extensions
+
+While we were quite pleased with the insights that we gained from our analysis, there is still room for improvement. 
+Firstly, due to time constraints we were unable to apply a more robust model such as a **LASSO** or **ridge regression** to penalize multicollinearity in the exogenous variables. 
+Additionally, the methods discussed in this presentation assumed spatial and spatio-temporal independence, which is violated in real-life. 
+These processes are inherently spatio-temporal, as weather data is discrete and regular in time and geo-statistical and irregular in space, while the economic productivity data is regular and consistent in time and on a spatial lattice based on each census subdivision in Canada.
+```{r, message=FALSE}
+
+climate_anomalies <- read_csv("climate_anomalies.csv", show_col_types = F) %>%
+  select(date, lat, lon, ends_with("anomaly")) %>%
+  pivot_longer(ends_with("anomaly"), names_to = "variable", 
+               values_to = "measurement",
+               values_drop_na = T)
+lim_lat <- c(47, 58)
+lim_t <- c("2005-05-01", "2005-09-01")
+lat_axis <- seq(lim_lat[1], lim_lat[2], length = 25)
+t_axis <- seq(ymd(lim_t[1]),ymd(lim_t[2]),by='months')
+lat_t_grid <- expand.grid(lat = lat_axis, t = t_axis)
+weather_grid <- climate_anomalies %>%
+filter(variable == "mean_max_temp_anomaly",
+date %within% interval(ymd(lim_t[1]),ymd(lim_t[2])),
+between(lat,lim_lat[1], lim_lat[2])
+)
+dists <- abs(outer(weather_grid$lat, lat_axis, "-"))
+weather_grid$lat <- lat_axis[apply(dists, 1, which.min)]
+weather_grid %>% group_by(lat, date) %>%
+summarise(measurement = mean(measurement)) %>%
+ggplot() + # take data
+geom_tile(aes(x = lat, y = date, fill = measurement)) + # plot
+STRbook::fill_scale(name = "Degrees ˚C") +
+ylab("Day number (days)") +
+xlab("Latitude (degrees)") + 
+  ggtitle("Hovmöller Plot of Mean Maximum Temperature Anomalies in Ontario") +
+theme_bw()
+
+climate_anomalies %>% filter(variable == "mean_max_temp_anomaly",
+date %within% interval(ymd(lim_t[1]),ymd(lim_t[2]))) %>%
+group_by(lat, lon) %>%
+summarise(mu_emp = mean(measurement)) %>%
+ggplot(aes(lat, mu_emp)) +
+geom_point() +
+  stat_smooth(method='lm', formula= y~x, se = FALSE) + 
+  ggtitle("Relationship Between Mean Maximum Temperature Anomalies and Latitude") + 
+xlab("Latitude (deg)") +
+ylab("Maximum Temperature Anomaly (Degrees ˚C)") + theme_bw()
+```
+
+This is illustrated by the
+potential time-latitude interaction shown in Hovmöller plot and the visible 
+trend in the correlation scatterplot of mean maximum 
+temperature anomalies and latitude. 
+Therefore, a natural extension of this project would be to investigate methods that incorporate spatio-temporal correlation and account for the related complex effects, such as following the methodology described in [Spatiotemporal Statistics in R](https://spacetimewithr.org/book) or using 
+a modified version of a [spatiotemporal LSTM](https://github.com/IBM/spatial-lstm/tree/master).
+
+# Final Remarks
+
+This concludes the analysis for the case study. Questions can be directed 
+towards the [authors](https://github.com/awosoga/ssc2023/blob/d6ac76718853bc04c0a32ace9d081e35f45cbd9e/README.md).
+Thank you for your attention.
